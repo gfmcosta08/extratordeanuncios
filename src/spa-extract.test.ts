@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   extractDescriptionFromRawText,
+  isBlockedOlxListing,
   isCloudflareBlocked,
   isGenericSiteTitle,
   pickBestTitle,
@@ -25,6 +26,17 @@ describe("spa-extract", () => {
 
   it("identifica título genérico do site", () => {
     expect(isGenericSiteTitle("Vivanci Imobiliária - Imóveis em Palmas TO")).toBe(true);
+    expect(isGenericSiteTitle("OLX - O Maior Site de Compra e Venda do Brasil")).toBe(true);
+  });
+
+  it("detecta OLX redirecionada para homepage", () => {
+    expect(
+      isBlockedOlxListing(
+        "https://to.olx.com.br/tocantins/lancamentos/terraco-urban-1503931",
+        "https://www.olx.com.br/",
+        "OLX - O Maior Site de Compra e Venda do Brasil",
+      ),
+    ).toBe(true);
   });
 
   it("extrai descrição após rótulo Descrição", () => {

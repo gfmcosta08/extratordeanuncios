@@ -18,8 +18,36 @@ export function isGenericSiteTitle(title: string): boolean {
     /imobili[aá]ria.*im[oó]veis em/.test(t) ||
     /encontre seu lugar/.test(t) ||
     /encontre apartamentos.*casas/.test(t) ||
-    /^vivanci imobili[aá]ria/.test(t)
+    /^vivanci imobili[aá]ria/.test(t) ||
+    /olx.*maior site de compra e venda/.test(t) ||
+    /^olx - o maior site/.test(t)
   );
+}
+
+export function isOlxListingUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (!u.hostname.includes("olx.com.br")) return false;
+    return (
+      /\/\d+\/?$/.test(u.pathname) ||
+      /\/lancamentos\//.test(u.pathname) ||
+      /\/imoveis\//.test(u.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function isBlockedOlxListing(
+  listingUrl: string,
+  canonicalUrl: string | undefined,
+  title: string,
+): boolean {
+  if (!isOlxListingUrl(listingUrl)) return false;
+  const canonical = (canonicalUrl ?? "").trim().replace(/\/+$/, "");
+  const looksLikeHome = !canonical || /^https:\/\/(www\.)?olx\.com\.br$/i.test(canonical);
+  if (looksLikeHome && isGenericSiteTitle(title)) return true;
+  return isGenericSiteTitle(title);
 }
 
 export function isGenericSiteDescription(description: string): boolean {
@@ -71,7 +99,34 @@ export function extractDescriptionFromRawText(rawText: string): string | undefin
   return undefined;
 }
 
-export async function waitForSpaContent(page: Page): Promise<void> {
+export async function waitForSpaContent(page: Page, pageUrl?: string): Promise<void> {
+  const url = pageUrl ?? "";
+
+  if (/\/imoveis/i.test(url)) {
+    try {
+      await page.waitForSelector('a[href*="/imovel/"]', { timeout: 20_000 });
+      return;
+    } catch {
+      // continua com heurística genérica
+    }
+  }
+
+  if (/olx\.com\.br/i.test(url) && isOlxListingUrl(url)) {
+    try {
+      await page.waitForFunction(
+        () => {
+          const body = document.body?.innerText ?? "";
+          const isHomeCarousel = /compre e venda online na olx/i.test(body.slice(0, 900));
+          return body.length > 500 && /R\$\s*[\d.]/.test(body) && !isHomeCarousel;
+        },
+        { timeout: 20_000 },
+      );
+      return;
+    } catch {
+      // continua com heurística genérica
+    }
+  }
+
   try {
     await page.waitForFunction(
       () => {

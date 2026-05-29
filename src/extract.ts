@@ -9,6 +9,7 @@ import {
   collectRenderedImageUrls,
   extractDescriptionFromRawText,
   isCloudflareBlocked,
+  isBlockedOlxListing,
   isGenericSiteDescription,
   pickBestTitle,
   waitForSpaContent,
@@ -356,7 +357,7 @@ async function loadPageContent(page: Page, url: string, includeText: boolean): P
   } catch {
     // SPA pode não estabilizar networkidle
   }
-  await waitForSpaContent(page);
+  await waitForSpaContent(page, url);
 
   const documentTitle = await page.title();
   const rawText = includeText ? await page.innerText("body") : undefined;
@@ -412,6 +413,10 @@ export async function extractFromUrl(
     const ogTitle = $('meta[property="og:title"]').attr("content")?.trim();
     const metaTitle = $("title").first().text().trim() || undefined;
     const finalTitle = pickBestTitle(documentTitle, metaTitle, ogTitle) ?? meta.title;
+
+    if (isBlockedOlxListing(url, meta.canonicalUrl, finalTitle ?? "")) {
+      throw new Error("site_blocked_cloudflare");
+    }
 
     let description = meta.description;
     if (!description || isGenericSiteDescription(meta.description ?? "")) {
