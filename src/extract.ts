@@ -1,8 +1,18 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { chromium, type Browser } from "playwright";
+import type { Page } from "playwright";
 import * as cheerio from "cheerio";
+
+import { DEFAULT_CONTEXT_OPTIONS, getBrowser } from "./browser";
+import {
+  collectRenderedImageUrls,
+  extractDescriptionFromRawText,
+  isCloudflareBlocked,
+  isGenericSiteDescription,
+  pickBestTitle,
+  waitForSpaContent,
+} from "./spa-extract";
 
 export type ExtractOptions = {
   includeHtml?: boolean;
@@ -37,28 +47,6 @@ export type ExtractedListing = {
   jsonLd?: unknown[];
   images: ExtractedImage[];
 };
-
-let browserPromise: Promise<Browser> | null = null;
-
-async function getBrowser(): Promise<Browser> {
-  if (!browserPromise) {
-    browserPromise = chromium.launch({ headless: true });
-    const close = async () => {
-      try {
-        const current = browserPromise;
-        if (!current) return;
-        const browser = await current;
-        await browser.close();
-      } catch {
-      } finally {
-        browserPromise = null;
-      }
-    };
-    process.once("SIGINT", close);
-    process.once("SIGTERM", close);
-  }
-  return browserPromise;
-}
 
 function sha1(input: string): string {
   return createHash("sha1").update(input).digest("hex");
@@ -215,6 +203,7 @@ function propertyImageScore(raw: string): number {
   if (isDecorativeImageUrl(lower)) return -100;
   if (/imoview\.com\.br.*\/imoveis\//.test(lower)) return 100;
   if (/kenlo\.io/.test(lower)) return 95;
+  if (/supabase\.co.*\/storage\/v1\/object\/public\/.*imoveis-fotos/.test(lower)) return 95;
   if (/foto\d+\.(jpe?g|webp|png)/.test(lower)) return 90;
   if (/\.(jpe?g|webp|png)(\?|$)/.test(lower)) return 40;
   return 0;
@@ -355,6 +344,45 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+async function loadPageContent(page: Page, url: string, includeText: boolean): Promise<{
+  html: string;
+  rawText?: string;
+  documentTitle: string;
+  renderedImageUrls: string[];
+}> {
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
+  try {
+    await page.waitForLoadState("networkidle", { timeout: 10000 });
+  } catch {
+    // SPA pode não estabilizar networkidle
+  }
+  await waitForSpaContent(page);
+
+  const documentTitle = await page.title();
+  const rawText = includeText ? await page.innerText("body") : undefined;
+  if (rawText && isCloudflareBlocked(documentTitle, rawText)) {
+    throw new Error("site_blocked_cloudflare");
+  }
+
+  const renderedImageUrls = await collectRenderedImageUrls(page, url);
+  const html = await page.content();
+  return { html, rawText, documentTitle, renderedImageUrls };
+}
+
+export async function fetchRenderedHtml(url: string): Promise<string> {
+  const browser = await getBrowser();
+  const context = await browser.newContext(DEFAULT_CONTEXT_OPTIONS);
+
+  try {
+    const page = await context.newPage();
+    const { html } = await loadPageContent(page, url, false);
+    await page.close();
+    return html;
+  } finally {
+    await context.close();
+  }
+}
+
 export async function extractFromUrl(
   url: string,
   options: ExtractOptions
@@ -368,25 +396,36 @@ export async function extractFromUrl(
   const hostname = parsedUrl.hostname;
 
   const browser = await getBrowser();
-  const context = await browser.newContext({
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
-  });
+  const context = await browser.newContext(DEFAULT_CONTEXT_OPTIONS);
 
   try {
     const page = await context.newPage();
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
-    try {
-      await page.waitForLoadState("networkidle", { timeout: 7000 });
-    } catch {
-    }
-
-    const html = await page.content();
-    const rawText = includeText ? await page.innerText("body") : undefined;
+    const { html, rawText, documentTitle, renderedImageUrls } = await loadPageContent(
+      page,
+      url,
+      includeText,
+    );
     await page.close();
 
     const meta = extractMetadataFromHtml(url, html);
-    const selectedImageUrls = meta.imageUrls.slice(0, Math.max(0, maxImages));
+    const $ = cheerio.load(html);
+    const ogTitle = $('meta[property="og:title"]').attr("content")?.trim();
+    const metaTitle = $("title").first().text().trim() || undefined;
+    const finalTitle = pickBestTitle(documentTitle, metaTitle, ogTitle) ?? meta.title;
+
+    let description = meta.description;
+    if (!description || isGenericSiteDescription(meta.description ?? "")) {
+      const fromText = rawText ? extractDescriptionFromRawText(rawText) : undefined;
+      if (fromText) description = fromText;
+    }
+
+    const mergedImages = rankPropertyImageUrls(
+      dedupeUrls([
+        ...meta.imageUrls,
+        ...renderedImageUrls.map((u) => toAbsoluteUrl(url, u)).filter((u): u is string => Boolean(u)),
+      ]),
+    );
+    const selectedImageUrls = mergedImages.slice(0, Math.max(0, maxImages));
 
     const fetchedAt = new Date().toISOString();
     const listingBase: ExtractedListing = {
@@ -394,8 +433,8 @@ export async function extractFromUrl(
       fetchedAt,
       hostname,
       canonicalUrl: meta.canonicalUrl,
-      title: meta.title,
-      description: meta.description,
+      title: finalTitle,
+      description,
       price: meta.structured.price,
       address: meta.structured.address,
       bedrooms: meta.structured.bedrooms,

@@ -1,6 +1,7 @@
 import express from "express";
 import { z } from "zod";
-import { extractFromUrl } from "./extract";
+import { extractFromUrl, fetchRenderedHtml } from "./extract";
+import { inferDualPricesFromCorpus, resolvePurposeFromPrices } from "./pricing";
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -265,6 +266,7 @@ function inferPurposeFromUrlOrText(url: string, text: string, html?: string): "s
 
   const saleMoneyContext = /\bvenda\b[^r$]{0,25}r\$/i.test(cleaned);
   const rentMoneyContext = /\b(aluguel|loca[cç][aã]o)\b[^r$]{0,25}r\$/i.test(cleaned);
+  if (saleMoneyContext && rentMoneyContext) return "";
   if (saleMoneyContext && !rentMoneyContext) return "sale";
   if (rentMoneyContext && !saleMoneyContext) return "rent";
 
@@ -291,6 +293,9 @@ function inferInternalCodeFromUrl(url: string): string {
     const u = new URL(url);
     const parts = u.pathname.split("/").filter(Boolean);
     const last = parts[parts.length - 1] ?? "";
+    if (u.hostname.toLowerCase().includes("vivanci.com") && parts[0] === "imovel" && last) {
+      return last;
+    }
     return last || "";
   } catch {
     return "";
@@ -562,105 +567,6 @@ function buildTextCorpus(data: Extracted): string {
   return parts.join("\n");
 }
 
-function inferPriceFromCorpus(url: string, corpus: string, purpose: "sale" | "rent" | ""): string {
-  const cleaned = corpus.replace(/\s+/g, " ").trim();
-  if (!cleaned) return "";
-  const hostname = (() => {
-    try {
-      return new URL(url).hostname.toLowerCase();
-    } catch {
-      return "";
-    }
-  })();
-
-  const moneyPattern = "(\\d{1,3}(?:\\s*[\\.\\s]\\s*\\d{3})+(?:,\\d+)?|\\d+(?:,\\d+)?)";
-  const genericMoneyRe = /R\$\s*(\d{1,3}(?:\s*[.\s]\s*\d{3})+(?:,\d+)?|\d+(?:,\d+)?)/gi;
-
-  if (hostname.endsWith("logos-to.com.br")) {
-    if (purpose === "sale") {
-      const logosSale = cleaned.match(
-        new RegExp(`(?:im[oó]vel\\s+para\\s+venda|para\\s+venda|venda)\\s+no\\s+valor\\s+de\\s+R\\$\\s*${moneyPattern}`, "i")
-      );
-      if (logosSale?.[1]) return normalizeDecimalString(logosSale[1]);
-    }
-    if (purpose === "rent") {
-      const logosRent = cleaned.match(
-        new RegExp(
-          `(?:im[oó]vel\\s+para\\s+aluguel|para\\s+aluguel|aluguel)\\s+no\\s+valor\\s+de\\s+R\\$\\s*${moneyPattern}`,
-          "i"
-        )
-      );
-      if (logosRent?.[1]) return normalizeDecimalString(logosRent[1]);
-    }
-  }
-
-  if (purpose === "sale") {
-    const saleThousandMatch = cleaned.match(/\bvenda\b[^R$]{0,80}R\$\s*(\d{1,3}(?:\.\d{3})+)\b/i);
-    if (saleThousandMatch?.[1]) return normalizeDecimalString(saleThousandMatch[1]);
-
-    const saleMatch = cleaned.match(new RegExp(`\\bvenda\\b[^R$]{0,60}R\\$\\s*${moneyPattern}`, "i"));
-    if (saleMatch?.[1]) return normalizeDecimalString(saleMatch[1]);
-
-    const allowPortalFallback =
-      hostname.endsWith("estiloimobiliaria.com") ||
-      hostname.endsWith("loft.com.br") ||
-      hostname.endsWith("casa63.com.br");
-    if (allowPortalFallback) {
-      for (const m of cleaned.matchAll(genericMoneyRe)) {
-        const amountRaw = m[1] ?? "";
-        const amount = normalizeDecimalString(amountRaw);
-        if (!amount) continue;
-
-        const idx = m.index ?? 0;
-        const before = cleaned.slice(Math.max(0, idx - 40), idx).toLowerCase();
-        if (/\b(iptu|condom[ií]nio|taxa)\b/.test(before)) continue;
-        return amount;
-      }
-    }
-
-    return "";
-  }
-  if (purpose === "rent") {
-    const rentMatch = cleaned.match(
-      new RegExp(`\\b(aluguel|loca[cç][aã]o)\\b[^R$]{0,60}R\\$\\s*${moneyPattern}`, "i")
-    );
-    if (rentMatch?.[2]) return normalizeDecimalString(rentMatch[2]);
-
-    const allowPortalFallback =
-      hostname.endsWith("estiloimobiliaria.com") ||
-      hostname.endsWith("loft.com.br") ||
-      hostname.endsWith("casa63.com.br");
-    if (allowPortalFallback) {
-      for (const m of cleaned.matchAll(genericMoneyRe)) {
-        const amountRaw = m[1] ?? "";
-        const amount = normalizeDecimalString(amountRaw);
-        if (!amount) continue;
-
-        const idx = m.index ?? 0;
-        const before = cleaned.slice(Math.max(0, idx - 40), idx).toLowerCase();
-        if (/\b(iptu|condom[ií]nio|taxa)\b/.test(before)) continue;
-        return amount;
-      }
-    }
-
-    return "";
-  }
-
-  for (const m of cleaned.matchAll(genericMoneyRe)) {
-    const amountRaw = m[1] ?? "";
-    const amount = normalizeDecimalString(amountRaw);
-    if (!amount) continue;
-
-    const idx = m.index ?? 0;
-    const before = cleaned.slice(Math.max(0, idx - 40), idx).toLowerCase();
-    if (/\b(iptu|condom[ií]nio|taxa)\b/.test(before)) continue;
-
-    return amount;
-  }
-
-  return "";
-}
-
 function isUnavailableListingPage(url: string, title: string, corpus: string): boolean {
   let hostname = "";
   try {
@@ -694,6 +600,24 @@ function isUnavailableListingPage(url: string, title: string, corpus: string): b
     if (t.includes("403 forbidden") || t.includes("manutencao") || t.includes("manutenção")) return true;
   }
 
+  if (/attention required|cloudflare|you have been blocked|cf-browser-verification/i.test(t)) {
+    return true;
+  }
+
+  try {
+    const path = new URL(url).pathname.replace(/\/+$/, "") || "/";
+    if (path === "/") {
+      if (/imobili[aá]ria.*im[oó]veis em/i.test(t) || /encontre seu lugar/i.test(t)) return true;
+    }
+  } catch {
+    // ignore
+  }
+
+  if (/imobili[aá]ria.*im[oó]veis em palmas/i.test(normalizeForHeuristics(title))) {
+    const hasPropertyMarker = /\b(quartos?|venda|loca[cç][aã]o|#\d{3,}|m²|m2)\b/i.test(t);
+    if (!hasPropertyMarker) return true;
+  }
+
   return false;
 }
 
@@ -723,7 +647,6 @@ function mapToListing(data: Extracted) {
   const fixedTitle = fixMojibakeIfNeeded(asStringOrEmpty(data.title));
   const property_subtype = inferPropertySubtype(data.url, fixedTitle, corpus);
 
-  const purpose = inferPurposeFromUrlOrText(data.url, corpus, data.html);
   const internalCode = inferInternalCodeFromUrl(data.url);
 
   const hostname = (() => {
@@ -825,9 +748,16 @@ function mapToListing(data: Extracted) {
 
   const iptu_amount = findMoneyAmountAfterBRL(corpus, "IPTU");
 
-  const price = inferPriceFromCorpus(data.url, corpus, purpose) || asDecimalStringOrEmpty(data.price);
-  const sale_price = purpose === "sale" ? price : "";
-  const rent_price = purpose === "rent" ? price : "";
+  const fallbackPrice = asDecimalStringOrEmpty(data.price);
+  let { sale_price, rent_price } = inferDualPricesFromCorpus(data.url, corpus, fallbackPrice);
+  let purpose = resolvePurposeFromPrices(sale_price, rent_price);
+  if (!sale_price && !rent_price) {
+    const hinted = inferPurposeFromUrlOrText(data.url, corpus, data.html);
+    if (hinted === "sale" && fallbackPrice) sale_price = fallbackPrice;
+    else if (hinted === "rent" && fallbackPrice) rent_price = fallbackPrice;
+    purpose = resolvePurposeFromPrices(sale_price, rent_price) || hinted;
+  }
+  const price = sale_price || rent_price || fallbackPrice;
   const unavailable = isUnavailableListingPage(data.url, fixedTitle, corpus);
 
   return {
@@ -966,6 +896,32 @@ app.post("/v1/extract", async (req, res) => {
   );
 
   res.json({ ok: true, results });
+});
+
+const DiscoverRequestSchema = z.object({
+  url: z.string().url(),
+});
+
+app.post("/v1/discover", async (req, res) => {
+  const parsed = DiscoverRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({
+      ok: false,
+      error: {
+        message: "Payload inválido",
+        details: parsed.error.flatten(),
+      },
+    });
+    return;
+  }
+
+  try {
+    const html = await fetchRenderedHtml(parsed.data.url);
+    res.json({ ok: true, url: parsed.data.url, html });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Erro desconhecido";
+    res.status(502).json({ ok: false, error: { message } });
+  }
 });
 
 const port = Number(process.env.PORT ?? 3000);
