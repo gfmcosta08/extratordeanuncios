@@ -618,6 +618,35 @@ function isUnavailableListingPage(url: string, title: string, corpus: string): b
     if (!hasPropertyMarker) return true;
   }
 
+  const titleNorm = normalizeForHeuristics(title);
+  if (/\b404\b.*not found|page not found|p[aá]gina n[aã]o encontrada/i.test(titleNorm)) return true;
+  if (/502\s+bad\s+gateway|be right back/i.test(t)) return true;
+  if (/\d+\s+melhores\s+im[oó]veis/i.test(t)) return true;
+  if (/^im[oó]veis\s*[-–|]/i.test(titleNorm) && !/\b(quartos?|su[ií]tes?|banheiros?)\b/i.test(t)) return true;
+  if (/im[oó]veis\s+df\s+casas/i.test(titleNorm)) return true;
+
+  try {
+    const u = new URL(url);
+    const path = u.pathname.replace(/\/+$/, "") || "/";
+    if (path === "/imoveis" || /^\/imoveis\/(?:a-venda|aluguel|venda|para-alugar|locacao)/i.test(path)) {
+      const onListing =
+        /\d+\s+melhores\s+im[oó]veis/i.test(t) ||
+        /im[oó]veis\s+df\s+casas/i.test(titleNorm) ||
+        (!/\b(quartos?|su[ií]tes?|banheiros?|m²|m2)\b/i.test(t) && titleNorm.includes("imobili"));
+      if (onListing) return true;
+    }
+    const phpPath = u.pathname.toLowerCase();
+    if (
+      (phpPath.endsWith("/imovel.php") || phpPath.endsWith("/detalhes-imovel.php")) &&
+      !u.searchParams.has("id") &&
+      !u.searchParams.has("imovel")
+    ) {
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+
   return false;
 }
 

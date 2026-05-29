@@ -22,6 +22,30 @@ function isSaleContext(window: string): boolean {
   return /\b(venda|à venda|a venda|para venda|comprar)\b/.test(window);
 }
 
+const PORTAL_PRICE_FALLBACK_SUFFIXES = [
+  "estiloimobiliaria.com",
+  "loft.com.br",
+  "casa63.com.br",
+  "casa63araguaina.com.br",
+  "simimoveis.net",
+  "imobiliariatropical.com",
+  "ricanato.com.br",
+  "ritacamposnegocios.com.br",
+  "varandaimobiliaria.com.br",
+  "valadaresimoveis.com.br",
+  "imperionegociosimob.com.br",
+  "eduardomotaimoveis.com.br",
+  "logos-to.com.br",
+  "boasorteimoveis.com.br",
+];
+
+function hostAllowsPortalPriceFallback(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  return PORTAL_PRICE_FALLBACK_SUFFIXES.some(
+    (suffix) => host === suffix || host.endsWith(`.${suffix}`),
+  );
+}
+
 export function inferPriceFromCorpus(url: string, corpus: string, purpose: "sale" | "rent" | ""): string {
   const cleaned = corpus.replace(/\s+/g, " ").trim();
   if (!cleaned) return "";
@@ -86,11 +110,7 @@ export function inferPriceFromCorpus(url: string, corpus: string, purpose: "sale
     );
     if (valorDeMatch?.[1]) return normalizeDecimalString(valorDeMatch[1]);
 
-    const allowPortalFallback =
-      hostname.endsWith("estiloimobiliaria.com") ||
-      hostname.endsWith("loft.com.br") ||
-      hostname.endsWith("casa63.com.br");
-    if (allowPortalFallback) {
+    if (hostAllowsPortalPriceFallback(hostname)) {
       for (const m of cleaned.matchAll(genericMoneyRe)) {
         const amountRaw = m[1] ?? "";
         const amount = normalizeDecimalString(amountRaw);
@@ -119,11 +139,7 @@ export function inferPriceFromCorpus(url: string, corpus: string, purpose: "sale
     );
     if (rentBeforeMonth?.[1]) return normalizeDecimalString(rentBeforeMonth[1]);
 
-    const allowPortalFallback =
-      hostname.endsWith("estiloimobiliaria.com") ||
-      hostname.endsWith("loft.com.br") ||
-      hostname.endsWith("casa63.com.br");
-    if (allowPortalFallback) {
+    if (hostAllowsPortalPriceFallback(hostname)) {
       for (const m of cleaned.matchAll(genericMoneyRe)) {
         const amountRaw = m[1] ?? "";
         const amount = normalizeDecimalString(amountRaw);

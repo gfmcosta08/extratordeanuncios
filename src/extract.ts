@@ -205,6 +205,8 @@ function propertyImageScore(raw: string): number {
   if (/imoview\.com\.br.*\/imoveis\//.test(lower)) return 100;
   if (/kenlo\.io/.test(lower)) return 95;
   if (/supabase\.co.*\/storage\/v1\/object\/public\/.*imoveis-fotos/.test(lower)) return 95;
+  if (/jetimob\.com/i.test(lower)) return 88;
+  if (/vistahost\.com\.br/i.test(lower)) return 88;
   if (/foto\d+\.(jpe?g|webp|png)/.test(lower)) return 90;
   if (/\.(jpe?g|webp|png)(\?|$)/.test(lower)) return 40;
   return 0;
@@ -351,7 +353,16 @@ async function loadPageContent(page: Page, url: string, includeText: boolean): P
   documentTitle: string;
   renderedImageUrls: string[];
 }> {
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
+  const navigationTimeoutMs = (() => {
+    try {
+      const host = new URL(url).hostname.toLowerCase();
+      if (host.includes("ricanato.com.br")) return 70_000;
+    } catch {
+      // ignore
+    }
+    return 55_000;
+  })();
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: navigationTimeoutMs });
   try {
     await page.waitForLoadState("networkidle", { timeout: 10000 });
   } catch {
