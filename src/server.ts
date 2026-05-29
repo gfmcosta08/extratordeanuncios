@@ -270,7 +270,18 @@ function inferPurposeFromUrlOrText(url: string, text: string, html?: string): "s
 
   if (hasSale && !hasRent) return "sale";
   if (hasRent && !hasSale) return "rent";
-  if (hasRent && hasSale) return "rent";
+  if (hasRent && hasSale) {
+    const head = cleaned.slice(0, 2500);
+    if (
+      /\b(a venda|à venda|para venda|im[oó]vel\s+para\s+venda|casa\s+a\s+venda)\b/.test(head)
+    ) {
+      return "sale";
+    }
+    const vendaIdx = head.search(/\bvenda\b/);
+    const alugarIdx = head.search(/\balugar\b/);
+    if (vendaIdx >= 0 && (alugarIdx < 0 || vendaIdx < alugarIdx)) return "sale";
+    return "rent";
+  }
 
   return "";
 }
@@ -444,6 +455,32 @@ function inferLocationFromCasaMineiraText(
     const suffix = u.pathname.match(/-([a-z]{2})\/\d+/i)?.[1] ?? "";
     if (suffix) state = suffix.toUpperCase();
   } catch {
+  }
+
+  return { neighborhood, city, state, postal_code: "" };
+}
+
+function inferLocationFromCasa63Text(
+  text: string,
+  title: string,
+): { neighborhood: string; city: string; state: string; postal_code: string } {
+  const cleaned = fixMojibakeIfNeeded(text.replace(/\s+/g, " ").trim());
+  let neighborhood = "";
+  let city = "";
+  let state = "";
+
+  if (title) {
+    const fromTitle = title.match(/-\s*([^-\n]+?)\s*$/);
+    if (fromTitle?.[1]) neighborhood = fromTitle[1].trim();
+  }
+
+  const loteamento = cleaned.match(
+    /\b(?:Loteamento|Setor|Condom[ií]nio)\s+([^,\n]+?),\s*([A-Za-zÀ-ÿ ]+?)\s*-\s*([A-Z]{2})\b/i,
+  );
+  if (loteamento) {
+    if (!neighborhood) neighborhood = (loteamento[1] ?? "").trim();
+    city = (loteamento[2] ?? "").trim();
+    state = (loteamento[3] ?? "").trim();
   }
 
   return { neighborhood, city, state, postal_code: "" };
@@ -702,6 +739,9 @@ function mapToListing(data: Extracted) {
   const locFromCasaMineira = hostname.endsWith("casamineira.com.br")
     ? inferLocationFromCasaMineiraText(corpus, data.url, asStringOrEmpty(data.address))
     : { neighborhood: "", city: "", state: "", postal_code: "" };
+  const locFromCasa63 = hostname.endsWith("casa63.com.br")
+    ? inferLocationFromCasa63Text(corpus, fixedTitle)
+    : { neighborhood: "", city: "", state: "", postal_code: "" };
 
   const locFromCorpus = inferLocationFromText(corpus);
   const locFromTitle = fixedTitle
@@ -711,10 +751,21 @@ function mapToListing(data: Extracted) {
   const neighborhood =
     locFromLogos.neighborhood ||
     locFromCasaMineira.neighborhood ||
+    locFromCasa63.neighborhood ||
     locFromCorpus.neighborhood ||
     locFromTitle.neighborhood;
-  const city = locFromLogos.city || locFromCasaMineira.city || locFromCorpus.city || locFromTitle.city;
-  const state = locFromLogos.state || locFromCasaMineira.state || locFromCorpus.state || locFromTitle.state;
+  const city =
+    locFromLogos.city ||
+    locFromCasaMineira.city ||
+    locFromCasa63.city ||
+    locFromCorpus.city ||
+    locFromTitle.city;
+  const state =
+    locFromLogos.state ||
+    locFromCasaMineira.state ||
+    locFromCasa63.state ||
+    locFromCorpus.state ||
+    locFromTitle.state;
   const postal_code =
     locFromLogos.postal_code ||
     locFromCasaMineira.postal_code ||
@@ -723,17 +774,22 @@ function mapToListing(data: Extracted) {
 
   const builtArea =
     findLabeledNumber(corpus, "Área construída") ||
-    findLabeledNumber(corpus, "Area construida");
+    findLabeledNumber(corpus, "Area construida") ||
+    findLabeledNumber(corpus, "Construção") ||
+    findLabeledNumber(corpus, "Construcao");
 
   const landArea =
     findLabeledNumber(corpus, "Área do terreno") ||
-    findLabeledNumber(corpus, "Area do terreno");
+    findLabeledNumber(corpus, "Area do terreno") ||
+    findLabeledNumber(corpus, "Terreno");
+
+  const quartoPatterns = [/\b(\d+)\s*quartos?\(?s?\)?\b/i, /\b(\d+)\s*(qts?)\b/i];
 
   const bedrooms =
     asNumberOrNull(data.bedrooms) ??
     findLabeledInt(corpus, "Quartos") ??
-    pickFirstInt(compact, [/\b(\d+)\s*(quartos?|qts?)\b/i]) ??
-    pickFirstInt(corpus, [/\b(\d+)\s*(quartos?|qts?)\b/i]);
+    pickFirstInt(compact, quartoPatterns) ??
+    pickFirstInt(corpus, quartoPatterns);
 
   const suites =
     findLabeledInt(corpus, "Suítes") ??
@@ -762,6 +818,7 @@ function mapToListing(data: Extracted) {
   const area_m2 =
     asDecimalStringOrEmpty(data.area) ||
     builtArea ||
+    landArea ||
     inferAreaFromUrl(data.url) ||
     pickFirstAreaM2(compact) ||
     pickFirstAreaM2(corpus);

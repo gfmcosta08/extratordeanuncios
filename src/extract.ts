@@ -199,6 +199,40 @@ function extractFromListingObject(listing: Record<string, unknown>): Partial<Ext
   return { title, description, price, address, bedrooms, area };
 }
 
+function isDecorativeImageUrl(raw: string): boolean {
+  const lower = raw.toLowerCase();
+  if (lower.endsWith(".svg")) return true;
+  if (/\/assets\/icons?\//.test(lower)) return true;
+  if (/\/assets\/img\/[a-z0-9]{5,12}\.png/.test(lower)) return true;
+  if (/\/flags?\//.test(lower)) return true;
+  if (/\/cms\/files\//.test(lower)) return true;
+  if (/icon-|favicon|sprite|logo-link|\/logo[./-]/.test(lower)) return true;
+  return false;
+}
+
+function propertyImageScore(raw: string): number {
+  const lower = raw.toLowerCase();
+  if (isDecorativeImageUrl(lower)) return -100;
+  if (/imoview\.com\.br.*\/imoveis\//.test(lower)) return 100;
+  if (/kenlo\.io/.test(lower)) return 95;
+  if (/foto\d+\.(jpe?g|webp|png)/.test(lower)) return 90;
+  if (/\.(jpe?g|webp|png)(\?|$)/.test(lower)) return 40;
+  return 0;
+}
+
+function rankPropertyImageUrls(urls: string[]): string[] {
+  const seen = new Set<string>();
+  return urls
+    .slice()
+    .sort((a, b) => propertyImageScore(b) - propertyImageScore(a))
+    .filter((url) => {
+      if (propertyImageScore(url) <= 0) return false;
+      if (seen.has(url)) return false;
+      seen.add(url);
+      return true;
+    });
+}
+
 function extractMetadataFromHtml(url: string, html: string): {
   canonicalUrl?: string;
   title?: string;
@@ -248,10 +282,12 @@ function extractMetadataFromHtml(url: string, html: string): {
     if (src) imageCandidates.push(src);
   });
 
-  const imageUrls = dedupeUrls(
-    imageCandidates
-      .map((u) => toAbsoluteUrl(url, u))
-      .filter((u): u is string => Boolean(u))
+  const imageUrls = rankPropertyImageUrls(
+    dedupeUrls(
+      imageCandidates
+        .map((u) => toAbsoluteUrl(url, u))
+        .filter((u): u is string => Boolean(u)),
+    ),
   );
 
   return {
